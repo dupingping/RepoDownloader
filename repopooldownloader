@@ -1,0 +1,157 @@
+#!/usr/bin/python
+
+import urllib
+from pyExcelerator import *
+import thread
+import time
+import os
+
+threadCountMax = 40
+threadCount = 0
+
+baseurl = os.sys.argv[1]
+
+fileindex_lck = thread.allocate_lock()
+fileindex = 0
+reponames = []
+filenames = []
+excludefilenames = {}
+
+threadCount = threadCountMax
+fileindex = 0
+
+totalsize = 0
+
+
+def download(filename):
+    path = baseurl + "/" + filename
+    destpath = "repo/pool/%s" % filename
+
+    pid = os.fork()
+
+    if pid == 0:
+	dirname = os.path.dirname(destpath)
+	os.system("mkdir -p %s" % dirname)
+	fd = os.open("/dev/null", os.W_OK)
+	os.dup2(fd, 1)
+	os.dup2(fd, 2)
+	os.execv("/usr/bin/wget", ("wget", path, "-O", destpath, "--timeout=10"))
+	os.sys.exit(0);
+
+    (pid, status) = os.wait()
+
+def threadfunc(th, arg):
+    global filenames
+    global fileindex
+    global fileindex_lck
+    global threadCount
+
+    while 1:
+	fileindex_lck.acquire()
+	if fileindex >= len(filenames):
+	    fileindex_lck.release()
+	    break
+
+	filename = filenames[fileindex]
+	fileindex += 1
+
+	fileindex_lck.release()
+
+	download(filename)
+
+    fileindex_lck.acquire()
+    threadCount -= 1
+    fileindex_lck.release()
+
+def getfiles(path):
+    global reponames
+    for i in os.listdir(path):
+	if os.path.isdir(path + "/" + i):
+	    getfiles(path + "/" + i)
+	    continue
+	reponames.append(path + "/" + i)
+
+def parseRepo(filename):
+    global totalsize
+    global excludefilenames
+    dn = ""
+    fn = ""
+    f = open(filename)
+    lines = f.read().split("\n")
+
+    inFile = 0
+
+    dup = 0
+
+    for line in lines:
+	if line.startswith("Directory: "):
+	    dn = line[len("Directory: "):]
+
+	elif line.startswith("Files:"):
+	    inFile = 1
+
+	elif line.startswith("Size: ") and dup == 0:
+	    totalsize += int(line[len("Size: "):])
+
+	elif line.startswith("Filename: "):
+	    fn = line[len("Filename: "):]
+	    if excludefilenames.has_key(fn):
+		print fn + " is duplicated\n"
+		dup = 1
+		continue
+	    filenames.append(fn)
+	    excludefilenames[fn] = 1
+
+	elif line.find(":") > 0:
+	    inFile = 0
+	    dn = ""
+
+	elif inFile and line.startswith(" "):
+	    fn = line.split(" ")[3]
+	    if excludefilenames.has_key(dn + "/" + fn):
+		print dn + "/" + fn + " is duplicated\n"
+		continue
+	    totalsize += int(line.split(" ")[2])
+	    filenames.append(dn + "/" + fn)
+	    excludefilenames[dn + "/" + fn] = 1
+
+	else:
+	    inFile = 0
+	    dn = ""
+    f.close()
+
+if __name__ == "__main__":
+
+    getfiles("repo/precise")
+    for i in reponames:
+	print i
+	parseRepo(i)
+
+    filenames = []
+    reponames = []
+
+    totalsize = 0
+
+    getfiles("repo/precise-backports")
+    getfiles("repo/precise-proposed")
+    getfiles("repo/precise-security")
+    getfiles("repo/precise-updates")
+
+    for i in reponames:
+	print i
+	parseRepo(i)
+
+    print "TotalSize(Bytes):", totalsize
+
+    for i in range(threadCountMax):
+	thread.start_new_thread(threadfunc, (0, i))
+
+    while 1:
+	fileindex_lck.acquire()
+	if threadCount == 0:
+	    fileindex_lck.release()
+	    break
+	fileindex_lck.release()
+	time.sleep(1)
+
+    print "Done"
